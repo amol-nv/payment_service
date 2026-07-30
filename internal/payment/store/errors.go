@@ -1,13 +1,16 @@
 package store
 
-import "errors"
+import "fmt"
 
-var (
-	ErrBadRequest      = errors.New("bad request")
-	ErrUnauthorized    = errors.New("unauthorized")
-	ErrForbidden       = errors.New("forbidden")
-	ErrNotFound        = errors.New("not found")
-	ErrConflict        = errors.New("conflict")
-	ErrUnprocessable   = errors.New("unprocessable entity")
-	ErrUpstreamFailure = errors.New("upstream failure")
-)
+type HTTPError struct {
+	StatusCode int
+	Body       []byte
+	Message    string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("payment store http error: status=%d message=%s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("payment store http error: status=%d", e.StatusCode)
+}

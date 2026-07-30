@@ -4,32 +4,43 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
-	"amol-nv/payment_service/internal/config"
-	"amol-nv/payment_service/internal/mvs/store"
-	"amol-nv/payment_service/internal/mvs/view"
-	"amol-nv/payment_service/internal/server"
+	"amol-nv/payment_service/internal/payment/service"
+	"amol-nv/payment_service/internal/payment/store"
+	"amol-nv/payment_service/internal/payment/view"
 )
 
 func main() {
-	cfg := config.Default()
-	if v := os.Getenv("PAYMENT_PROVIDER_BASE_URL"); v != "" {
-		cfg.PaymentProviderBaseURL = v
+	providerBaseURL := os.Getenv("PAYMENT_PROVIDER_BASE_URL")
+	if providerBaseURL == "" {
+		providerBaseURL = "http://localhost:8081"
 	}
-	if v := os.Getenv("PAYMENT_PROVIDER_AUTH_TOKEN"); v != "" {
-		cfg.PaymentProviderAuthToken = v
+	providerEndpointPath := os.Getenv("PAYMENT_PROVIDER_ENDPOINT_PATH")
+	if providerEndpointPath == "" {
+		providerEndpointPath = "/payments"
 	}
-	addr := os.Getenv("ADDR")
+
+	st, err := store.NewHTTPPaymentStore(store.PaymentStoreConfig{
+		BaseURL:      providerBaseURL,
+		EndpointPath: providerEndpointPath,
+		Timeout:      10 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("failed to create payment store: %v", err)
+	}
+
+	svc := service.NewPaymentService(st)
+	h := view.NewPaymentHandler(svc)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/payments", h.PostPayment)
+
+	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 
-	paymentStore := store.NewPaymentStore(cfg)
-	paymentHandler := view.NewPaymentHandler(paymentStore)
-
-	srv := server.New(addr, paymentHandler)
 	log.Printf("payment service listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
-	}
+	log.Fatal(http.ListenAndServe(addr, mux))
 }
