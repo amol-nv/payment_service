@@ -6,81 +6,76 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"amol-nv/payment_service/internal/mvs/dto"
+	"amol-nv/payment_service/internal/payment/model"
 )
 
-func TestHTTPPaymentStore_PostPayment_Success(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody []byte
+func TestPaymentStore_PostPayment_Success(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotContentType string
+	var gotBody model.PaymentPostRequest
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
-		gotBody, _ = io.ReadAll(r.Body)
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(dto.PostPaymentResponse{PaymentID: "p1", Status: "created"})
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(model.PaymentPostResponse{Status: "ok", TxnID: "txn_123", Message: "accepted"})
 	}))
-	defer ts.Close()
+	defer srv.Close()
 
-	st, err := NewHTTPPaymentStore(PaymentStoreConfig{
-		BaseURL:      ts.URL,
-		EndpointPath: "/payments",
-		Timeout:      2 * time.Second,
-	})
+	client := &http.Client{Timeout: 2 * time.Second}
+	st := NewPaymentStore(client, srv.URL, "token123")
+
+	resp, err := st.PostPayment(context.Background(), model.PaymentPostRequest{Amount: 100, Currency: "USD", OrderID: "ord_1", CustomerID: "c1"})
 	if err != nil {
-		t.Fatalf("NewHTTPPaymentStore error: %v", err)
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if resp.Status != "ok" || resp.TxnID != "txn_123" {
+		t.Fatalf("unexpected response: %+v", resp)
 	}
 
-	in := dto.PostPaymentRequest{Amount: 100, Currency: "USD", OrderID: "o1"}
-	out, err := st.PostPayment(context.Background(), in)
-	if err != nil {
-		t.Fatalf("PostPayment error: %v", err)
-	}
-	if out.PaymentID != "p1" || out.Status != "created" {
-		t.Fatalf("unexpected response: %+v", out)
-	}
 	if gotMethod != http.MethodPost {
 		t.Fatalf("expected method POST, got %s", gotMethod)
 	}
 	if gotPath != "/payments" {
 		t.Fatalf("expected path /payments, got %s", gotPath)
 	}
-
-	var decoded dto.PostPaymentRequest
-	if err := json.Unmarshal(gotBody, &decoded); err != nil {
-		t.Fatalf("invalid json body: %v", err)
+	if gotAuth != "Bearer token123" {
+		t.Fatalf("expected auth header, got %q", gotAuth)
 	}
-	if decoded != in {
-		t.Fatalf("unexpected request body: got %+v want %+v", decoded, in)
+	if gotContentType != "application/json" {
+		t.Fatalf("expected content-type application/json, got %q", gotContentType)
+	}
+	if gotBody.Amount != 100 || gotBody.Currency != "USD" || gotBody.OrderID != "ord_1" || gotBody.CustomerID != "c1" {
+		t.Fatalf("unexpected request body: %+v", gotBody)
 	}
 }
 
-func TestHTTPPaymentStore_PostPayment_Non2xx(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
+func TestPaymentStore_PostPayment_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(dto.ErrorResponse{Code: "bad_request", Message: "bad"})
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad_request","message":"invalid"}`))
 	}))
-	defer ts.Close()
+	defer srv.Close()
 
-	st, err := NewHTTPPaymentStore(PaymentStoreConfig{
-		BaseURL:      ts.URL,
-		EndpointPath: "/payments",
-		Timeout:      2 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("NewHTTPPaymentStore error: %v", err)
-	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	st := NewPaymentStore(client, srv.URL, "")
 
-	_, err = st.PostPayment(context.Background(), dto.PostPaymentRequest{Amount: 1, Currency: "USD", OrderID: "o1"})
+	_, err := st.PostPayment(context.Background(), model.PaymentPostRequest{Amount: 1, Currency: "USD", OrderID: "o"})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok := err.(*HTTPError); !ok {
-		t.Fatalf("expected *HTTPError, got %T", err)
+	if !strings.Contains(err.Error(), "payment post failed") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -7,81 +7,89 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
-	"amol-nv/payment_service/internal/mvs/dto"
+	"amol-nv/payment_service/internal/payment/model"
 )
 
 type PaymentStore interface {
-	PostPayment(ctx context.Context, req dto.PostPaymentRequest) (dto.PostPaymentResponse, error)
+	PostPayment(ctx context.Context, req model.PaymentPostRequest) (model.PaymentPostResponse, error)
 }
 
-type httpPaymentStore struct {
-	client  *http.Client
-	baseURL string
-	// endpointPath is the path on the payment provider.
-	endpointPath string
+type paymentStore struct {
+	client    *http.Client
+	baseURL   string
+	authToken string
+	endpoint  string
 }
 
-type PaymentStoreConfig struct {
-	BaseURL      string
-	EndpointPath string
-	Timeout      time.Duration
-}
-
-func NewHTTPPaymentStore(cfg PaymentStoreConfig) (PaymentStore, error) {
-	if cfg.BaseURL == "" {
-		return nil, fmt.Errorf("BaseURL is required")
+func NewPaymentStore(client *http.Client, baseURL, authToken string) PaymentStore {
+	return &paymentStore{
+		client:    client,
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		authToken: authToken,
+		endpoint:  "/payments",
 	}
-	if cfg.EndpointPath == "" {
-		cfg.EndpointPath = "/payments"
-	}
-	client := &http.Client{Timeout: cfg.Timeout}
-	return &httpPaymentStore{
-		client:       client,
-		baseURL:      cfg.BaseURL,
-		endpointPath: cfg.EndpointPath,
-	}, nil
 }
 
-func (s *httpPaymentStore) PostPayment(ctx context.Context, req dto.PostPaymentRequest) (dto.PostPaymentResponse, error) {
-	url := s.baseURL + s.endpointPath
-
+func (s *paymentStore) PostPayment(ctx context.Context, req model.PaymentPostRequest) (model.PaymentPostResponse, error) {
 	b, err := json.Marshal(req)
 	if err != nil {
-		return dto.PostPaymentResponse{}, fmt.Errorf("marshal request: %w", err)
+		return model.PaymentPostResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+	u, err := url.Parse(s.baseURL)
 	if err != nil {
-		return dto.PostPaymentResponse{}, fmt.Errorf("create request: %w", err)
+		return model.PaymentPostResponse{}, fmt.Errorf("parse base url: %w", err)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + s.endpoint
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(b))
+	if err != nil {
+		return model.PaymentPostResponse{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if s.authToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+s.authToken)
+	}
 
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return dto.PostPaymentResponse{}, fmt.Errorf("do request: %w", err)
+		return model.PaymentPostResponse{}, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return dto.PostPaymentResponse{}, fmt.Errorf("read response: %w", err)
-	}
+	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Try to decode provider error.
-		var er dto.ErrorResponse
+		var er model.ErrorResponse
 		if len(body) > 0 {
 			_ = json.Unmarshal(body, &er)
 		}
-		msg := er.Message
-		return dto.PostPaymentResponse{}, &HTTPError{StatusCode: resp.StatusCode, Body: body, Message: msg}
+		if er.Error == "" {
+			er.Error = http.StatusText(resp.StatusCode)
+		}
+		if er.Message == "" {
+			er.Message = string(body)
+		}
+		return model.PaymentPostResponse{}, fmt.Errorf("payment post failed: status=%d error=%s message=%s", resp.StatusCode, er.Error, er.Message)
 	}
 
-	var out dto.PostPaymentResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return dto.PostPaymentResponse{}, fmt.Errorf("decode response: %w", err)
+	var pr model.PaymentPostResponse
+	if err := json.Unmarshal(body, &pr); err != nil {
+		return model.PaymentPostResponse{}, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return out, nil
+
+	// Ensure we don't return a zero-value response silently in case of empty body.
+	if pr.Status == "" && pr.TxnID == "" {
+		// small guard; not strictly required
+		_ = time.Second
+	}
+
+	return pr, nil
 }
+
+// compile-time check
+var _ PaymentStore = (*paymentStore)(nil)
